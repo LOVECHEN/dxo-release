@@ -1,0 +1,7 @@
+# 下载/镜像产物(绝不进仓库)
+rel-*/
+notes-*.md
+*.dmg
+*.part
+checksums.sha256
+.DS_Store
