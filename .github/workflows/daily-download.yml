@@ -53,7 +53,10 @@ jobs:
             KEY=$(echo "$KEY"  | xargs); [ -n "$KEY" ] || continue
             NAME=$(echo "$NAME" | xargs)
             URL=$(echo "$URL"  | xargs); [ -n "$URL" ] || continue
+            # 遮蔽:完整 URL + 主机名 都打码(不单单域名),即使某处只露出一部分也被 *** 掉
             echo "::add-mask::$URL"
+            HOST=$(printf '%s' "$URL" | sed -E 's~^[a-zA-Z]+://([^/]+).*~\1~')
+            [ -n "$HOST" ] && [ "$HOST" != "$URL" ] && echo "::add-mask::$HOST"
             if [ "$ONLY" != "all" ] && [ "$ONLY" != "$KEY" ]; then echo "⏭ 跳过 $KEY"; continue; fi
 
             echo "═══ $KEY ($NAME) ═══"
