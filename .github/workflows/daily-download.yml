@@ -1,8 +1,9 @@
 name: Daily DxO Mirror
-# 把 DxO 全家桶 macOS 官方安装包镜像到 GitHub Releases。
-# 官方直链存在仓库 Secret DXO_URLS 里(每行 "key|显示名|URL"),日志自动 ::add-mask:: 打码,不落入公开代码。
-# 点版本号在 dmg 内部(APFS/HFS 混用,CI 无法可靠读取),故用官方文件的更新日期(Last-Modified)标记版本;
-# 资产保留官方原始文件名。超过 GitHub 单文件 2GiB 上限的自动分卷。
+# 把 DxO 全家桶 macOS 官方安装包镜像到 GitHub Releases,文件名带真实点版本号(如 DxO_PhotoLab_9.8.0.dmg)。
+# 跑在 macOS runner:下载官方原包后挂载 dmg 读真实版本(pkg 的 Distribution / app 的 CFBundleShortVersionString /
+# 二进制 strings 三级兜底),再按版本重命名、超 2GiB 分卷、发 Release。
+# 官方直链存 Secret DXO_URLS(每行 "key|显示名|URL"),日志 ::add-mask:: 打码完整 URL + 主机名,不落公开代码。
+# public repo 的 macOS Actions 分钟免费。
 
 on:
   schedule:
@@ -14,7 +15,7 @@ on:
         required: false
         default: "all"
       force:
-        description: "强制重镜像(即使该日期 tag 已存在)"
+        description: "强制重镜像(即使该版本 tag 已存在)"
         required: false
         default: "false"
 
@@ -30,14 +31,9 @@ concurrency:
 
 jobs:
   mirror:
-    runs-on: ubuntu-latest
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
-
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
-          df -h / | tail -1
 
       - name: Mirror
         env:
@@ -47,67 +43,103 @@ jobs:
         run: |
           set -uo pipefail
           [ -n "${DXO_URLS:-}" ] || { echo "::error::Secret DXO_URLS 未设置(每行 key|显示名|URL)"; exit 1; }
-          LIMIT=$((1900*1024*1024))   # >~1.9GiB 就分卷(GitHub 单文件上限 2GiB)
+          LIMIT=$((1900*1024*1024))   # >~1.9GiB 分卷(GitHub 单文件上限 2GiB)
+          TMP="${RUNNER_TEMP:-/tmp}"
+
+          # 挂载 dmg 读真实点版本:pkg 的 Distribution → app 的 CFBundleShortVersionString → 二进制 strings(MAJOR.x.x)
+          extract_version() {
+            local dmg="$1" MAJOR="$2" mp ver="" pkg app ex exe cand
+            mp=$(mktemp -d "$TMP/mnt.XXXXXX")
+            hdiutil attach "$dmg" -nobrowse -readonly -noautoopen -noverify -mountpoint "$mp" >/dev/null 2>&1 || { echo ""; return; }
+            pkg=$(find "$mp" -maxdepth 1 \( -name '*.pkg' -o -name '*.mpkg' \) | head -1)
+            if [ -n "$pkg" ]; then
+              ex=$(mktemp -d "$TMP/ex.XXXXXX")
+              ( cd "$ex" && xar -xf "$pkg" Distribution PackageInfo >/dev/null 2>&1 )
+              ver=$(grep -ohE 'version="[0-9][0-9.]*"' "$ex"/Distribution "$ex"/PackageInfo 2>/dev/null | grep -oE '[0-9][0-9.]*' | grep -E "^${MAJOR}\.[0-9]" | head -1)
+              rm -rf "$ex"
+            fi
+            if [ -z "$ver" ]; then
+              app=$(find "$mp" -maxdepth 1 -name '*.app' -not -iname 'Uninstall*' | head -1)
+              [ -n "$app" ] && ver=$(defaults read "$app/Contents/Info" CFBundleShortVersionString 2>/dev/null)
+            fi
+            if [ -z "$ver" ] || [ "${ver%%.*}" != "$MAJOR" ]; then
+              app=$(find "$mp" -maxdepth 1 -name '*.app' -not -iname 'Uninstall*' | head -1)
+              if [ -n "$app" ]; then
+                exe="$app/Contents/MacOS/$(defaults read "$app/Contents/Info" CFBundleExecutable 2>/dev/null)"
+                cand=$(strings -a "$exe" 2>/dev/null | grep -oE "${MAJOR}\.[0-9]+\.[0-9]+" | sort | uniq -c | sort -rn | head -1 | awk '{print $2}')
+                [ -n "$cand" ] && ver="$cand"
+              fi
+            fi
+            hdiutil detach "$mp" >/dev/null 2>&1; rmdir "$mp" 2>/dev/null
+            printf '%s' "$ver" | grep -oE '[0-9]+(\.[0-9]+){1,3}' | head -1 | cut -d. -f1-3
+          }
 
           printf '%s\n' "$DXO_URLS" | while IFS='|' read -r KEY NAME URL; do
             KEY=$(echo "$KEY"  | xargs); [ -n "$KEY" ] || continue
             NAME=$(echo "$NAME" | xargs)
             URL=$(echo "$URL"  | xargs); [ -n "$URL" ] || continue
-            # 遮蔽:完整 URL + 主机名 都打码(不单单域名),即使某处只露出一部分也被 *** 掉
             echo "::add-mask::$URL"
             HOST=$(printf '%s' "$URL" | sed -E 's~^[a-zA-Z]+://([^/]+).*~\1~')
             [ -n "$HOST" ] && [ "$HOST" != "$URL" ] && echo "::add-mask::$HOST"
             if [ "$ONLY" != "all" ] && [ "$ONLY" != "$KEY" ]; then echo "⏭ 跳过 $KEY"; continue; fi
+            MAJOR=$(echo "$KEY" | grep -oE '[0-9]+$')
 
             echo "═══ $KEY ($NAME) ═══"
-            # 只读响应头拿 Last-Modified(1 字节 range GET,兼容 CDN)
+            # 便宜去重:响应头 ETag 与该产品最新 release 记录的相同 → 不下载
             hdr=$(curl -fsSL --retry 3 --max-time 60 -D - -o /dev/null -r 0-0 "$URL" 2>/dev/null || true)
-            lm=$(printf '%s\n' "$hdr" | grep -i '^last-modified:' | head -1 | tr -d '\r' | sed -E 's/^[^:]*:[[:space:]]*//')
-            if [ -n "$lm" ]; then
-              STAMP=$(date -u -d "$lm" +%Y%m%d 2>/dev/null || date -u +%Y%m%d)
-              DATE=$(date -u -d "$lm" +%Y-%m-%d 2>/dev/null || date -u +%Y-%m-%d)
-            else
-              STAMP=$(date -u +%Y%m%d); DATE=$(date -u +%Y-%m-%d)
-            fi
-            TAG="${KEY}-${STAMP}"
-            TITLE="${NAME} · ${DATE}"
-
-            if [ "$FORCE" != "true" ] && gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-              echo "  ⏭ $TAG 已存在,跳过"; continue
+            etag=$(printf '%s\n' "$hdr" | grep -i '^etag:' | head -1 | tr -d '\r"' | sed -E 's/^[^:]*:[[:space:]]*//')
+            latest=$(gh release list --repo "$GITHUB_REPOSITORY" --json tagName --jq "[.[].tagName | select(startswith(\"${KEY}-\"))] | .[0]" 2>/dev/null || true)
+            if [ -n "$latest" ] && [ "$FORCE" != "true" ] && [ -n "$etag" ]; then
+              prev=$(gh release view "$latest" --repo "$GITHUB_REPOSITORY" --json body -q .body 2>/dev/null | sed -nE 's/.*etag:([^ )]+).*/\1/p' | head -1)
+              if [ "$prev" = "$etag" ]; then echo "  ⏭ ETag 未变,跳过(最新已是 $latest)"; continue; fi
             fi
 
             fname=$(basename "${URL%%\?*}")
-            DIR="rel-$TAG"; rm -rf "$DIR"; mkdir -p "$DIR"
+            DIR="$TMP/rel-$KEY"; rm -rf "$DIR"; mkdir -p "$DIR"
             echo "  📥 下载 $fname ..."
             if ! curl -fL --retry 4 --retry-delay 5 --connect-timeout 30 -o "$DIR/$fname" "$URL" 2>/dev/null; then
               echo "  ❌ 下载失败,跳过"; rm -rf "$DIR"; continue
             fi
 
-            realsize=$(stat -c%s "$DIR/$fname")
-            human=$(numfmt --to=iec --suffix=B "$realsize")
-            orig_sha=$(sha256sum "$DIR/$fname" | awk '{print $1}')
+            VER=$(extract_version "$DIR/$fname" "$MAJOR")
+            [ -n "$VER" ] || VER=$(date -u +%Y.%m.%d)   # 万一读不到版本,退回日期
+            TAG="${KEY}-${VER}"
+            SHORT=$(printf '%s' "$NAME" | sed -E "s/ *${MAJOR}\$//")   # 去掉尾部主版本
+            TITLE="${SHORT} ${VER}"
+            OUT="$(printf '%s' "$SHORT" | tr ' ' '_')_${VER}.dmg"       # DxO_PhotoLab_9.8.0.dmg
+
+            if [ "$FORCE" != "true" ] && gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "  ⏭ $TAG 已存在,跳过"; rm -rf "$DIR"; continue
+            fi
+            echo "  🆕 版本 $VER → $OUT"
+
+            mv "$DIR/$fname" "$DIR/$OUT"
+            realsize=$(stat -f%z "$DIR/$OUT")
+            human=$(awk -v b="$realsize" 'BEGIN{ if(b>=1073741824)printf "%.2f GB",b/1073741824; else printf "%.0f MB",b/1048576 }')
+            orig_sha=$(shasum -a 256 "$DIR/$OUT" | awk '{print $1}')
 
             SPLIT_NOTE=""
             if [ "$realsize" -gt "$LIMIT" ]; then
               echo "  ✂️ >2GiB,分卷..."
-              ( cd "$DIR" && split -b 1900m -d --additional-suffix=".part" "$fname" "${fname}." && rm -f "$fname" )
-              SPLIT_NOTE=$(printf '> ⚠️ 该安装包超过 GitHub 单文件 2GiB 上限,已分卷。请下载**全部** `%s.NN.part` 后合并:\n>\n> ```bash\n> cat %s.*.part > %s\n> shasum -a 256 %s   # 应为 %s\n> ```' "$fname" "$fname" "$fname" "$fname" "$orig_sha")
+              ( cd "$DIR" && split -b 1900m "$OUT" "${OUT}.part." && rm -f "$OUT" )
+              SPLIT_NOTE=$(printf '> ⚠️ 超过 GitHub 单文件 2GiB 上限,已分卷。下载**全部** `%s.part.*` 后合并:\n>\n> ```bash\n> cat %s.part.* > %s\n> shasum -a 256 %s   # 应为 %s\n> ```' "$OUT" "$OUT" "$OUT" "$OUT" "$orig_sha")
             fi
 
-            ( cd "$DIR" && sha256sum * > checksums.sha256 )
+            ( cd "$DIR" && shasum -a 256 * > checksums.sha256 )
 
-            NOTES="notes-$TAG.md"
+            NOTES="$TMP/notes-$KEY.md"
             {
               echo "## $TITLE"; echo
-              echo "🍎 macOS 官方安装包 · 更新日期 **$DATE** · 大小 $human"; echo
+              echo "🍎 macOS 官方安装包 · 版本 **$VER** · 大小 $human"; echo
               if [ -n "$SPLIT_NOTE" ]; then echo "$SPLIT_NOTE"; echo; fi
               echo "### 完整包 SHA-256"
               echo '```'
-              echo "$orig_sha  $fname"
+              echo "$orig_sha  $OUT"
               echo '```'
               echo
               echo "---"
               echo "> 🤖 自动镜像于 $(date -u '+%Y-%m-%d %H:%M UTC') · 官方原始安装包,未做任何修改。"
+              echo "<!-- etag:${etag:-none} -->"
             } > "$NOTES"
 
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TITLE" --notes-file "$NOTES" "$DIR"/*
@@ -115,8 +147,7 @@ jobs:
             rm -rf "$DIR" "$NOTES"
           done
 
-  # public repo 的 schedule 在仓库 60 天无提交活动后会被 GitHub 自动禁用。
-  # DxO 更新不频繁,距上次提交 >50 天时推一个空提交兜底。
+  # public repo 的 schedule 在仓库 60 天无提交活动后会被 GitHub 自动禁用,距上次提交 >50 天推空提交兜底。
   keepalive:
     runs-on: ubuntu-latest
     needs: mirror

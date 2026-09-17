@@ -25,10 +25,10 @@
 | 🌅 **DxO PureRAW 6** | [![](https://img.shields.io/github/v/release/LOVECHEN/dxo-release?filter=pureraw6-*&label=PureRAW%206&color=e07b39)](https://github.com/LOVECHEN/dxo-release/releases?q=pureraw6) |
 | 🎨 **Nik Collection 9** | [![](https://img.shields.io/github/v/release/LOVECHEN/dxo-release?filter=nikcollection9-*&label=Nik%20Collection%209&color=8e44ad)](https://github.com/LOVECHEN/dxo-release/releases?q=nikcollection9) |
 
-> - 资产保留 DxO **官方原始文件名**（如 `DxO_PhotoLab9.dmg`），macOS 均为 Universal（Apple Silicon + Intel）。
-> - Release 以官方安装包的**更新日期**标记（tag 形如 `photolab9-20260901`）——官方一更新，这里就跟一版。
+> - 资产文件名带**真实点版本号**（如 `DxO_PhotoLab_9.8.0.dmg`、`Nik_Collection_9.0.0.dmg`），macOS 均为 Universal（Apple Silicon + Intel）。
+> - Release 以点版本号标记（tag 形如 `photolab9-9.8.0`）——官方一更新，这里就跟一版。
 > - 每个 Release 附 `checksums.sha256`，下载后可校验完整性。
-> - 个别安装包 > 2GiB（GitHub 单文件上限），会**分卷**为 `xxx.NN.part`；下载全部分卷后按 Release 说明 `cat` 合并即可。
+> - 个别安装包 > 2GiB（GitHub 单文件上限），会**分卷**为 `xxx.dmg.part.*`；下载全部分卷后按 Release 说明 `cat` 合并即可。
 
 ---
 
